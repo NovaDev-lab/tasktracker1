@@ -4,6 +4,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import {
@@ -30,10 +31,15 @@ export const Route = createFileRoute("/_authenticated/")({
 type Task = {
   id: string;
   person_name: string;
+  email: string | null;
   task: string;
   deadline: string;
+  completed: boolean;
+  completed_at: string | null;
   created_at: string;
 };
+
+type Status = "completed" | "overdue" | "pending";
 
 const NOTIFIED_KEY = "task-tracker-notified-ids";
 const getNotified = (): string[] => {
@@ -47,6 +53,30 @@ const addNotified = (id: string) => {
   const set = new Set(getNotified());
   set.add(id);
   localStorage.setItem(NOTIFIED_KEY, JSON.stringify([...set]));
+};
+const clearNotified = (id: string) => {
+  const remaining = getNotified().filter((x) => x !== id);
+  localStorage.setItem(NOTIFIED_KEY, JSON.stringify(remaining));
+};
+
+const getStatus = (t: Task): Status => {
+  if (t.completed) return "completed";
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  if (new Date(t.deadline) <= today) return "overdue";
+  return "pending";
+};
+
+const statusRowClass: Record<Status, string> = {
+  completed: "bg-green-100 dark:bg-green-950/40",
+  pending: "bg-yellow-50 dark:bg-yellow-950/30",
+  overdue: "bg-red-100 dark:bg-red-950/40",
+};
+
+const statusHexFill: Record<Status, string> = {
+  completed: "FFC6F6D5", // green
+  pending: "FFFEF3C7", // yellow
+  overdue: "FFFECACA", // red
 };
 
 function playBeep() {
@@ -94,7 +124,8 @@ function TasksPage() {
   const load = async () => {
     const { data, error } = await supabase
       .from("tasks")
-      .select("id, person_name, task, deadline, created_at")
+      .select("id, person_name, email, task, deadline, completed, completed_at, created_at")
+      .order("completed", { ascending: true })
       .order("deadline", { ascending: true });
     if (error) toast.error(error.message);
     else setTasks((data ?? []) as Task[]);
@@ -114,7 +145,7 @@ function TasksPage() {
     today.setHours(0, 0, 0, 0);
     const notified = new Set(getNotified());
     const due = tasksRef.current.filter(
-      (t) => !notified.has(t.id) && new Date(t.deadline) <= today,
+      (t) => !t.completed && !notified.has(t.id) && new Date(t.deadline) <= today,
     );
     if (due.length === 0) return;
     playBeep();
@@ -168,17 +199,22 @@ function TasksPage() {
     const form = e.currentTarget;
     const fd = new FormData(form);
     const person_name = String(fd.get("person_name") ?? "").trim();
+    const personEmail = String(fd.get("email") ?? "").trim();
     const task = String(fd.get("task") ?? "").trim();
     const deadline = String(fd.get("deadline") ?? "");
     if (!person_name || !task || !deadline) {
-      toast.error("Please fill all fields");
+      toast.error("Please fill name, task and deadline");
       return;
     }
     setSubmitting(true);
     const { data: userData } = await supabase.auth.getUser();
-    const { error } = await supabase
-      .from("tasks")
-      .insert({ person_name, task, deadline, user_id: userData.user!.id });
+    const { error } = await supabase.from("tasks").insert({
+      person_name,
+      email: personEmail || null,
+      task,
+      deadline,
+      user_id: userData.user!.id,
+    });
     setSubmitting(false);
     if (error) {
       toast.error(error.message);
@@ -198,30 +234,44 @@ function TasksPage() {
     }
   };
 
+  const onToggleComplete = async (t: Task, checked: boolean) => {
+    const { error } = await supabase
+      .from("tasks")
+      .update({ completed: checked, completed_at: checked ? new Date().toISOString() : null })
+      .eq("id", t.id);
+    if (error) {
+      toast.error(error.message);
+      return;
+    }
+    if (checked) addNotified(t.id);
+    else clearNotified(t.id);
+    toast.success(checked ? "Marked as completed" : "Marked as pending");
+    load();
+  };
+
   const onSaveEdit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     if (!editing) return;
     const fd = new FormData(e.currentTarget);
     const person_name = String(fd.get("person_name") ?? "").trim();
+    const personEmail = String(fd.get("email") ?? "").trim();
     const task = String(fd.get("task") ?? "").trim();
     const deadline = String(fd.get("deadline") ?? "");
     if (!person_name || !task || !deadline) {
-      toast.error("Please fill all fields");
+      toast.error("Please fill name, task and deadline");
       return;
     }
     setSavingEdit(true);
     const { error } = await supabase
       .from("tasks")
-      .update({ person_name, task, deadline })
+      .update({ person_name, email: personEmail || null, task, deadline })
       .eq("id", editing.id);
     setSavingEdit(false);
     if (error) {
       toast.error(error.message);
       return;
     }
-    // Reset notified flag so changed deadlines can re-alert
-    const remaining = getNotified().filter((id) => id !== editing.id);
-    localStorage.setItem(NOTIFIED_KEY, JSON.stringify(remaining));
+    clearNotified(editing.id);
     toast.success("Task updated");
     setEditing(null);
     load();
@@ -234,20 +284,31 @@ function TasksPage() {
       const wb = new ExcelJS.Workbook();
       const ws = wb.addWorksheet("Tasks");
       ws.columns = [
-        { header: "Person", key: "person_name", width: 24 },
-        { header: "Task", key: "task", width: 48 },
-        { header: "Deadline", key: "deadline", width: 16 },
+        { header: "Person", key: "person_name", width: 22 },
+        { header: "Email", key: "email", width: 28 },
+        { header: "Task", key: "task", width: 40 },
+        { header: "Deadline", key: "deadline", width: 14 },
+        { header: "Status", key: "status", width: 12 },
+        { header: "Completed At", key: "completed_at", width: 22 },
         { header: "Created", key: "created_at", width: 22 },
       ];
       ws.getRow(1).font = { bold: true };
-      tasks.forEach((t) =>
-        ws.addRow({
+      tasks.forEach((t) => {
+        const status = getStatus(t);
+        const row = ws.addRow({
           person_name: t.person_name,
+          email: t.email ?? "",
           task: t.task,
           deadline: t.deadline,
+          status: status.charAt(0).toUpperCase() + status.slice(1),
+          completed_at: t.completed_at ? new Date(t.completed_at).toLocaleString() : "",
           created_at: new Date(t.created_at).toLocaleString(),
-        }),
-      );
+        });
+        const fill = statusHexFill[status];
+        row.eachCell((cell) => {
+          cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: fill } };
+        });
+      });
       const buf = await wb.xlsx.writeBuffer();
       const blob = new Blob([buf], {
         type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -271,12 +332,6 @@ function TasksPage() {
   const onSignOut = async () => {
     await supabase.auth.signOut();
     navigate({ to: "/auth" });
-  };
-
-  const isOverdue = (deadline: string) => {
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    return new Date(deadline) <= today;
   };
 
   return (
@@ -308,15 +363,21 @@ function TasksPage() {
         <Card>
           <CardHeader>
             <CardTitle>Add a task</CardTitle>
-            <CardDescription>Assign a task with a deadline. It saves instantly.</CardDescription>
+            <CardDescription>
+              Assign a task with a deadline. Add the person's email to send them a deadline alert.
+            </CardDescription>
           </CardHeader>
           <CardContent>
-            <form onSubmit={onAdd} className="grid gap-3 sm:grid-cols-[1fr_2fr_auto_auto]">
+            <form onSubmit={onAdd} className="grid gap-3 sm:grid-cols-2">
               <div className="space-y-1.5">
                 <Label htmlFor="person_name">Person</Label>
                 <Input id="person_name" name="person_name" placeholder="e.g. Alex" required />
               </div>
               <div className="space-y-1.5">
+                <Label htmlFor="person_email">Email (optional)</Label>
+                <Input id="person_email" name="email" type="email" placeholder="alex@example.com" />
+              </div>
+              <div className="space-y-1.5 sm:col-span-2">
                 <Label htmlFor="task">Task</Label>
                 <Input id="task" name="task" placeholder="Describe the task" required />
               </div>
@@ -337,7 +398,9 @@ function TasksPage() {
           <CardHeader className="flex flex-row items-center justify-between gap-3">
             <div>
               <CardTitle>Your tasks</CardTitle>
-              <CardDescription>{tasks.length} {tasks.length === 1 ? "task" : "tasks"}</CardDescription>
+              <CardDescription>
+                {tasks.length} {tasks.length === 1 ? "task" : "tasks"} · green = completed, yellow = pending, red = overdue
+              </CardDescription>
             </div>
             <Button onClick={onExport} disabled={exporting || tasks.length === 0} variant="default">
               {exporting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Download className="mr-2 h-4 w-4" />}
@@ -357,32 +420,45 @@ function TasksPage() {
               <Table>
                 <TableHeader>
                   <TableRow>
+                    <TableHead className="w-10">Done</TableHead>
                     <TableHead>Person</TableHead>
+                    <TableHead>Email</TableHead>
                     <TableHead>Task</TableHead>
                     <TableHead>Deadline</TableHead>
                     <TableHead className="w-24"></TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {tasks.map((t) => (
-                    <TableRow key={t.id}>
-                      <TableCell className="font-medium">{t.person_name}</TableCell>
-                      <TableCell>{t.task}</TableCell>
-                      <TableCell className={isOverdue(t.deadline) ? "text-destructive font-medium" : ""}>
-                        {t.deadline}
-                      </TableCell>
-                      <TableCell>
-                        <div className="flex justify-end gap-1">
-                          <Button size="icon" variant="ghost" onClick={() => setEditing(t)} aria-label="Edit">
-                            <Pencil className="h-4 w-4" />
-                          </Button>
-                          <Button size="icon" variant="ghost" onClick={() => onDelete(t.id)} aria-label="Delete">
-                            <Trash2 className="h-4 w-4 text-destructive" />
-                          </Button>
-                        </div>
-                      </TableCell>
-                    </TableRow>
-                  ))}
+                  {tasks.map((t) => {
+                    const status = getStatus(t);
+                    return (
+                      <TableRow key={t.id} className={statusRowClass[status]}>
+                        <TableCell>
+                          <Checkbox
+                            checked={t.completed}
+                            onCheckedChange={(c) => onToggleComplete(t, c === true)}
+                            aria-label="Mark complete"
+                          />
+                        </TableCell>
+                        <TableCell className={`font-medium ${t.completed ? "line-through opacity-70" : ""}`}>
+                          {t.person_name}
+                        </TableCell>
+                        <TableCell className="text-sm text-muted-foreground">{t.email ?? "—"}</TableCell>
+                        <TableCell className={t.completed ? "line-through opacity-70" : ""}>{t.task}</TableCell>
+                        <TableCell>{t.deadline}</TableCell>
+                        <TableCell>
+                          <div className="flex justify-end gap-1">
+                            <Button size="icon" variant="ghost" onClick={() => setEditing(t)} aria-label="Edit">
+                              <Pencil className="h-4 w-4" />
+                            </Button>
+                            <Button size="icon" variant="ghost" onClick={() => onDelete(t.id)} aria-label="Delete">
+                              <Trash2 className="h-4 w-4 text-destructive" />
+                            </Button>
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })}
                 </TableBody>
               </Table>
             )}
@@ -394,13 +470,17 @@ function TasksPage() {
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Edit task</DialogTitle>
-            <DialogDescription>Update the person, task, or deadline.</DialogDescription>
+            <DialogDescription>Update the person, email, task, or deadline.</DialogDescription>
           </DialogHeader>
           {editing && (
             <form onSubmit={onSaveEdit} className="space-y-4">
               <div className="space-y-1.5">
                 <Label htmlFor="edit_person_name">Person</Label>
                 <Input id="edit_person_name" name="person_name" defaultValue={editing.person_name} required />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="edit_email">Email (optional)</Label>
+                <Input id="edit_email" name="email" type="email" defaultValue={editing.email ?? ""} />
               </div>
               <div className="space-y-1.5">
                 <Label htmlFor="edit_task">Task</Label>
