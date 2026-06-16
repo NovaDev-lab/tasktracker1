@@ -16,13 +16,23 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 import { toast } from "sonner";
-import { Download, LogOut, Trash2, Loader2, FileSpreadsheet, Pencil, Bell, BellOff } from "lucide-react";
+import {
+  Download,
+  LogOut,
+  Trash2,
+  Loader2,
+  FileSpreadsheet,
+  Pencil,
+  Bell,
+  BellOff,
+  MessageCircle,
+} from "lucide-react";
 
 export const Route = createFileRoute("/_authenticated/")({
   head: () => ({
     meta: [
       { title: "My Tasks — Task Tracker" },
-      { name: "description", content: "Add tasks, set deadlines, and export to Excel." },
+      { name: "description", content: "Add tasks, set deadlines, send WhatsApp reminders, and export to Excel." },
     ],
   }),
   component: TasksPage,
@@ -31,7 +41,7 @@ export const Route = createFileRoute("/_authenticated/")({
 type Task = {
   id: string;
   person_name: string;
-  email: string | null;
+  phone: string | null;
   task: string;
   deadline: string;
   completed: boolean;
@@ -74,10 +84,18 @@ const statusRowClass: Record<Status, string> = {
 };
 
 const statusHexFill: Record<Status, string> = {
-  completed: "FFC6F6D5", // green
-  pending: "FFFEF3C7", // yellow
-  overdue: "FFFECACA", // red
+  completed: "FFC6F6D5",
+  pending: "FFFEF3C7",
+  overdue: "FFFECACA",
 };
+
+const waLink = (phone: string, message: string) => {
+  const digits = phone.replace(/[^\d]/g, "");
+  return `https://wa.me/${digits}?text=${encodeURIComponent(message)}`;
+};
+
+const reminderMessage = (t: Task) =>
+  `Hi ${t.person_name}, friendly reminder: "${t.task}" is due on ${t.deadline}.`;
 
 function playBeep() {
   try {
@@ -124,7 +142,7 @@ function TasksPage() {
   const load = async () => {
     const { data, error } = await supabase
       .from("tasks")
-      .select("id, person_name, email, task, deadline, completed, completed_at, created_at")
+      .select("id, person_name, phone, task, deadline, completed, completed_at, created_at")
       .order("completed", { ascending: true })
       .order("deadline", { ascending: true });
     if (error) toast.error(error.message);
@@ -140,6 +158,14 @@ function TasksPage() {
     }
   }, []);
 
+  const sendWhatsApp = (t: Task) => {
+    if (!t.phone) {
+      toast.error("No phone number for this task");
+      return;
+    }
+    window.open(waLink(t.phone, reminderMessage(t)), "_blank", "noopener,noreferrer");
+  };
+
   const checkDeadlines = () => {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
@@ -152,7 +178,10 @@ function TasksPage() {
     due.forEach((t) => {
       toast.warning(`Deadline reached: ${t.task}`, {
         description: `${t.person_name} — due ${t.deadline}`,
-        duration: 8000,
+        duration: 10000,
+        action: t.phone
+          ? { label: "WhatsApp", onClick: () => sendWhatsApp(t) }
+          : undefined,
       });
       if (typeof Notification !== "undefined" && Notification.permission === "granted") {
         try {
@@ -199,7 +228,7 @@ function TasksPage() {
     const form = e.currentTarget;
     const fd = new FormData(form);
     const person_name = String(fd.get("person_name") ?? "").trim();
-    const personEmail = String(fd.get("email") ?? "").trim();
+    const phone = String(fd.get("phone") ?? "").trim();
     const task = String(fd.get("task") ?? "").trim();
     const deadline = String(fd.get("deadline") ?? "");
     if (!person_name || !task || !deadline) {
@@ -210,7 +239,7 @@ function TasksPage() {
     const { data: userData } = await supabase.auth.getUser();
     const { error } = await supabase.from("tasks").insert({
       person_name,
-      email: personEmail || null,
+      phone: phone || null,
       task,
       deadline,
       user_id: userData.user!.id,
@@ -254,7 +283,7 @@ function TasksPage() {
     if (!editing) return;
     const fd = new FormData(e.currentTarget);
     const person_name = String(fd.get("person_name") ?? "").trim();
-    const personEmail = String(fd.get("email") ?? "").trim();
+    const phone = String(fd.get("phone") ?? "").trim();
     const task = String(fd.get("task") ?? "").trim();
     const deadline = String(fd.get("deadline") ?? "");
     if (!person_name || !task || !deadline) {
@@ -264,7 +293,7 @@ function TasksPage() {
     setSavingEdit(true);
     const { error } = await supabase
       .from("tasks")
-      .update({ person_name, email: personEmail || null, task, deadline })
+      .update({ person_name, phone: phone || null, task, deadline })
       .eq("id", editing.id);
     setSavingEdit(false);
     if (error) {
@@ -285,7 +314,7 @@ function TasksPage() {
       const ws = wb.addWorksheet("Tasks");
       ws.columns = [
         { header: "Person", key: "person_name", width: 22 },
-        { header: "Email", key: "email", width: 28 },
+        { header: "Phone", key: "phone", width: 18 },
         { header: "Task", key: "task", width: 40 },
         { header: "Deadline", key: "deadline", width: 14 },
         { header: "Status", key: "status", width: 12 },
@@ -297,7 +326,7 @@ function TasksPage() {
         const status = getStatus(t);
         const row = ws.addRow({
           person_name: t.person_name,
-          email: t.email ?? "",
+          phone: t.phone ?? "",
           task: t.task,
           deadline: t.deadline,
           status: status.charAt(0).toUpperCase() + status.slice(1),
@@ -364,7 +393,7 @@ function TasksPage() {
           <CardHeader>
             <CardTitle>Add a task</CardTitle>
             <CardDescription>
-              Assign a task with a deadline. Add the person's email to send them a deadline alert.
+              Add the person's WhatsApp number (with country code, e.g. +14155550123) to send reminders.
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -374,8 +403,8 @@ function TasksPage() {
                 <Input id="person_name" name="person_name" placeholder="e.g. Alex" required />
               </div>
               <div className="space-y-1.5">
-                <Label htmlFor="person_email">Email (optional)</Label>
-                <Input id="person_email" name="email" type="email" placeholder="alex@example.com" />
+                <Label htmlFor="phone">WhatsApp number (optional)</Label>
+                <Input id="phone" name="phone" type="tel" placeholder="+14155550123" />
               </div>
               <div className="space-y-1.5 sm:col-span-2">
                 <Label htmlFor="task">Task</Label>
@@ -422,10 +451,10 @@ function TasksPage() {
                   <TableRow>
                     <TableHead className="w-10">Done</TableHead>
                     <TableHead>Person</TableHead>
-                    <TableHead>Email</TableHead>
+                    <TableHead>Phone</TableHead>
                     <TableHead>Task</TableHead>
                     <TableHead>Deadline</TableHead>
-                    <TableHead className="w-24"></TableHead>
+                    <TableHead className="w-32"></TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -443,11 +472,21 @@ function TasksPage() {
                         <TableCell className={`font-medium ${t.completed ? "line-through opacity-70" : ""}`}>
                           {t.person_name}
                         </TableCell>
-                        <TableCell className="text-sm text-muted-foreground">{t.email ?? "—"}</TableCell>
+                        <TableCell className="text-sm text-muted-foreground">{t.phone ?? "—"}</TableCell>
                         <TableCell className={t.completed ? "line-through opacity-70" : ""}>{t.task}</TableCell>
                         <TableCell>{t.deadline}</TableCell>
                         <TableCell>
                           <div className="flex justify-end gap-1">
+                            <Button
+                              size="icon"
+                              variant="ghost"
+                              onClick={() => sendWhatsApp(t)}
+                              disabled={!t.phone}
+                              aria-label="Send WhatsApp reminder"
+                              title={t.phone ? "Send WhatsApp reminder" : "No phone number"}
+                            >
+                              <MessageCircle className="h-4 w-4 text-green-600" />
+                            </Button>
                             <Button size="icon" variant="ghost" onClick={() => setEditing(t)} aria-label="Edit">
                               <Pencil className="h-4 w-4" />
                             </Button>
@@ -470,7 +509,7 @@ function TasksPage() {
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Edit task</DialogTitle>
-            <DialogDescription>Update the person, email, task, or deadline.</DialogDescription>
+            <DialogDescription>Update the person, phone, task, or deadline.</DialogDescription>
           </DialogHeader>
           {editing && (
             <form onSubmit={onSaveEdit} className="space-y-4">
@@ -479,8 +518,8 @@ function TasksPage() {
                 <Input id="edit_person_name" name="person_name" defaultValue={editing.person_name} required />
               </div>
               <div className="space-y-1.5">
-                <Label htmlFor="edit_email">Email (optional)</Label>
-                <Input id="edit_email" name="email" type="email" defaultValue={editing.email ?? ""} />
+                <Label htmlFor="edit_phone">WhatsApp number (optional)</Label>
+                <Input id="edit_phone" name="phone" type="tel" defaultValue={editing.phone ?? ""} placeholder="+14155550123" />
               </div>
               <div className="space-y-1.5">
                 <Label htmlFor="edit_task">Task</Label>
