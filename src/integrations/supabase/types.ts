@@ -16,24 +16,33 @@ export type Database = {
     Tables: {
       tasks: {
         Row: {
+          completed: boolean
+          completed_at: string | null
           created_at: string
           deadline: string
+          email: string | null
           id: string
           person_name: string
           task: string
           user_id: string
         }
         Insert: {
+          completed?: boolean
+          completed_at?: string | null
           created_at?: string
           deadline: string
+          email?: string | null
           id?: string
           person_name: string
           task: string
           user_id: string
         }
         Update: {
+          completed?: boolean
+          completed_at?: string | null
           created_at?: string
           deadline?: string
+          email?: string | null
           id?: string
           person_name?: string
           task?: string
